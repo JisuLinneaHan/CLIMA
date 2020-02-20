@@ -6,9 +6,10 @@ using Printf
 
 
 # analysis folder
-#ana_folder = "/central/scratch/bischtob/heldsuarez/nc"
-ana_folder = "/Users/lenka/Desktop/CLIMA/output"
-num_avg = 6
+ana_folder = "/central/scratch/bischtob/heldsuarez/nc"
+num_avg_a = 350
+num_avg_b = num_avg_a + 12
+num_avg = num_avg_b - num_avg_a + 1
 
 # read the Netcdf files from disk
 function read_ncfiles(filename, filename_aux, pinfo)
@@ -41,7 +42,8 @@ u_a = zeros(num_avg, size(rad)[1], size(lat)[1], size(lon)[1])
 e_a = zeros(num_avg, size(rad)[1], size(lat)[1], size(lon)[1])
 T_a = zeros(num_avg, size(rad)[1], size(lat)[1], size(lon)[1])
 for i in 1:num_avg
-  lon, lat, rad, ρ_a[i,:,:,:], u_a[i,:,:,:], e_a[i,:,:,:], T_a[i,:,:,:] = read_ncfiles(@sprintf("hs_step000%s.nc",i), @sprintf("hs_step000%s_aux.nc",i), false)
+  ind = num_avg_a + i - 1
+  lon, lat, rad, ρ_a[i,:,:,:], u_a[i,:,:,:], e_a[i,:,:,:] = read_ncfiles(@sprintf("hs_test_step0%s.nc", ind), false)
 end
 
 # average data
@@ -49,6 +51,7 @@ u_zm = dropdims( mean(u_a, dims = (1,4) ) , dims = (1,4) )
 T_zm = dropdims( mean(T_a, dims = (1,4) ) , dims = (1,4) )
 
 # plot
+gr()
 contourf(lat*180/3.14 .- 90.0, rad, u_zm, levels=10)
 
 xlabel!("latitude")
@@ -60,5 +63,3 @@ c=contourf(lat*180/3.14 .- 90.0, rad, T_zm, levels=10)
 xlabel!("latitude")
 ylabel!("z [m]")
 savefig("zonal_mean_T.png")
-
-

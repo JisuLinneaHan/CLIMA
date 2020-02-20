@@ -13,7 +13,6 @@ using CLIMA.MoistThermodynamics
 using CLIMA.PlanetParameters
 using CLIMA.VariableTemplates
 
-const h_ground = MSLP
 const p_ground = MSLP
 const T_initial = 255
 const domain_height = 30e3
