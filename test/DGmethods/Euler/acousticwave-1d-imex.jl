@@ -11,13 +11,14 @@ using CLIMA.ColumnwiseLUSolver: ManyColumnLU
 using CLIMA.VTK: writevtk, writepvtu
 using CLIMA.GenericCallbacks: EveryXWallTimeSeconds, EveryXSimulationSteps
 using CLIMA.PlanetParameters: planet_radius, day
-using CLIMA.MoistThermodynamics: air_density, soundspeed_air, internal_energy
+using CLIMA.MoistThermodynamics: air_density, soundspeed_air, internal_energy, PhaseDry_given_pT
 using CLIMA.Atmos: AtmosModel, SphericalOrientation,
                    DryModel, NoPrecipitation, NoRadiation, NoFluxBC,
                    ConstantViscosityWithDivergence,
                    vars_state, vars_aux,
                    Gravity, HydrostaticState, IsothermalProfile,
                    AtmosAcousticGravityLinearModel, AtmosLESConfiguration
+                   altitude, longitude
 using CLIMA.VariableTemplates: flattenednames
 
 using MPI, Logging, StaticArrays, LinearAlgebra, Printf, Dates, Test
@@ -184,10 +185,9 @@ function (setup::AcousticWaveSetup)(bl, state, aux, coords, t)
   # callable to set initial conditions
   FT = eltype(state)
 
-  r = norm(coords, 2)
-  @inbounds λ = atan(coords[2], coords[1])
-  @inbounds φ = asin(coords[3] / r)
-  h = r - FT(planet_radius)
+  λ = longitude(bl.orientation, aux)
+  φ = latitude(bl.orientation, aux)
+  h = altitude(bl.orientation, aux)
 
   β = min(FT(1), setup.α * acos(cos(φ) * cos(λ)))
   f = (1 + cos(FT(π) * β)) / 2
@@ -195,9 +195,14 @@ function (setup::AcousticWaveSetup)(bl, state, aux, coords, t)
   Δp = setup.γ * f * g
   p = aux.ref_state.p + Δp
 
-  state.ρ = air_density(setup.T_ref, p)
+  ts       = PhaseDry_given_pT(p, setup.T_ref)
+  q_pt     = PhasePartition(ts)
+  e_pot    = gravitational_potential(bl.orientation, aux)
+  e_int    = internal_energy(ts)
+
+  state.ρ  = air_density(ts)
   state.ρu = SVector{3, FT}(0, 0, 0)
-  state.ρe = state.ρ * (internal_energy(setup.T_ref) + aux.orientation.Φ)
+  state.ρe = state.ρ * (e_int + e_pot)
   nothing
 end
 
