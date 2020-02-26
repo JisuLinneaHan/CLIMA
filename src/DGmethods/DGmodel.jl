@@ -37,6 +37,7 @@ function (dg::DGModel)(dQdt, Q, ::Nothing, t; increment=false)
   Nqk = dim == 2 ? 1 : Nq
   Nfp = Nq * Nqk
   nrealelem = length(topology.realelems)
+  ntotal = (Nq, Nq, Nqk, nrealelem)
 
   Qvisc = dg.diffstate
   Qhypervisc_grad, Qhypervisc_div = dg.hyperdiffstate
@@ -72,10 +73,11 @@ function (dg::DGModel)(dQdt, Q, ::Nothing, t; increment=false)
 
   if nviscstate > 0 || nhyperviscstate > 0
 
-    @launch(device, threads=(Nq, Nq, Nqk), blocks=nrealelem,
-            volumeviscterms!(bl, Val(dim), Val(N), dg.diffusion_direction, Q.data,
-                             Qvisc.data, Qhypervisc_grad.data, auxstate.data, grid.vgeo, t,
-                             grid.D, hypervisc_indexmap, topology.realelems))
+    volumevisc! = volumeviscterms!(device, (Nq, Nq, Nqk), ntotal)
+    event = volumevisc!(bl, Val(dim), Val(N), dg.diffusion_direction, Q.data,
+                        Qvisc.data, Qhypervisc_grad.data, auxstate.data, grid.vgeo, t,
+                        grid.D, hypervisc_indexmap, topology.realelems)
+    wait(event)
 
     if communicate
       MPIStateArrays.finish_ghost_recv!(Q)
@@ -84,12 +86,13 @@ function (dg::DGModel)(dQdt, Q, ::Nothing, t; increment=false)
       end
     end
 
-    @launch(device, threads=Nfp, blocks=nrealelem,
-            faceviscterms!(bl, Val(dim), Val(N), dg.diffusion_direction,
-                           dg.gradnumflux,
-                           Q.data, Qvisc.data, Qhypervisc_grad.data, auxstate.data,
-                           grid.vgeo, grid.sgeo, t, grid.vmap⁻, grid.vmap⁺, grid.elemtobndy,
-                           hypervisc_indexmap, topology.realelems))
+    facevisc! = faceviscterms!(device, (Nfp,), (Nfp * nrealelem,))
+    event = facevisc!(bl, Val(dim), Val(N), dg.diffusion_direction,
+                      dg.gradnumflux,
+                      Q.data, Qvisc.data, Qhypervisc_grad.data, auxstate.data,
+                      grid.vgeo, grid.sgeo, t, grid.vmap⁻, grid.vmap⁺, grid.elemtobndy,
+                      hypervisc_indexmap, topology.realelems)
+    wait(event)
 
     if communicate
       nviscstate > 0 && MPIStateArrays.start_ghost_exchange!(Qvisc)
@@ -110,20 +113,22 @@ function (dg::DGModel)(dQdt, Q, ::Nothing, t; increment=false)
     #########################
     # Laplacian Computation #
     #########################
-   
-    @launch(device, threads=(Nq, Nq, Nqk), blocks=nrealelem,
-            volumedivgrad!(bl, Val(dim), Val(N), dg.diffusion_direction,
-                           Qhypervisc_grad.data, Qhypervisc_div.data, grid.vgeo,
-                           grid.D, topology.realelems))
+  
+    voldivgrad! = volumedivgrad!(device, (Nq, Nq, Nqk), ntotal)
+    event = voldivgrad!(bl, Val(dim), Val(N), dg.diffusion_direction,
+                        Qhypervisc_grad.data, Qhypervisc_div.data, grid.vgeo,
+                        grid.D, topology.realelems)
+    wait(event)
     
     communicate && MPIStateArrays.finish_ghost_recv!(Qhypervisc_grad)
 
-    @launch(device, threads=Nfp, blocks=nrealelem,
-            facedivgrad!(bl, Val(dim), Val(N), dg.diffusion_direction,
-                         CentralDivPenalty(),
-                         Qhypervisc_grad.data, Qhypervisc_div.data,
-                         grid.vgeo, grid.sgeo, grid.vmap⁻, grid.vmap⁺, grid.elemtobndy,
-                         topology.realelems))
+    fdivgrad! = facedivgrad!(device, (Nfp,), (Nfp * nrealelem,))
+    event = fdivgrad!(bl, Val(dim), Val(N), dg.diffusion_direction,
+                      CentralDivPenalty(),
+                      Qhypervisc_grad.data, Qhypervisc_div.data,
+                      grid.vgeo, grid.sgeo, grid.vmap⁻, grid.vmap⁺, grid.elemtobndy,
+                      topology.realelems)
+    wait(event)
     
     communicate && MPIStateArrays.start_ghost_exchange!(Qhypervisc_div)
     
@@ -131,22 +136,24 @@ function (dg::DGModel)(dQdt, Q, ::Nothing, t; increment=false)
     # Hyperdiffusive terms computation #
     ####################################
    
-    @launch(device, threads=(Nq, Nq, Nqk), blocks=nrealelem,
-            volumehyperviscterms!(bl, Val(dim), Val(N), dg.diffusion_direction,
-                                    Qhypervisc_grad.data, Qhypervisc_div.data,
-                                    Q.data, auxstate.data,
-                                    grid.vgeo, grid.ω, grid.D,
-                                    topology.realelems, t))
+    volumehypervisc! = volumehyperviscterms!(device, (Nq, Nq, Nqk), ntotal)
+    event = volumehypervisc!(bl, Val(dim), Val(N), dg.diffusion_direction,
+                             Qhypervisc_grad.data, Qhypervisc_div.data,
+                             Q.data, auxstate.data,
+                             grid.vgeo, grid.ω, grid.D,
+                             topology.realelems, t)
+    wait(event)
     
     communicate && MPIStateArrays.finish_ghost_recv!(Qhypervisc_div)
 
-    @launch(device, threads=Nfp, blocks=nrealelem,
-            facehyperviscterms!(bl, Val(dim), Val(N), dg.diffusion_direction,
-                                CentralHyperDiffusiveFlux(),
-                                Qhypervisc_grad.data, Qhypervisc_div.data,
-                                Q.data, auxstate.data,
-                                grid.vgeo, grid.sgeo, grid.vmap⁻, grid.vmap⁺,
-                                grid.elemtobndy, topology.realelems, t))
+    facehypervisc! = facehyperviscterms!(device, (Nfp,), (Nfp * nrealelem,))
+    event = facehypervisc!(bl, Val(dim), Val(N), dg.diffusion_direction,
+                           CentralHyperDiffusiveFlux(),
+                           Qhypervisc_grad.data, Qhypervisc_div.data,
+                           Q.data, auxstate.data,
+                           grid.vgeo, grid.sgeo, grid.vmap⁻, grid.vmap⁺,
+                           grid.elemtobndy, topology.realelems, t)
+    wait(event)
     
     communicate && MPIStateArrays.start_ghost_exchange!(Qhypervisc_grad)
   end
@@ -155,10 +162,11 @@ function (dg::DGModel)(dQdt, Q, ::Nothing, t; increment=false)
   ###################
   # RHS Computation #
   ###################
-  @launch(device, threads=(Nq, Nq, Nqk), blocks=nrealelem,
-          volumerhs!(bl, Val(dim), Val(N), dg.diffusion_direction, dQdt.data,
-                     Q.data, Qvisc.data, Qhypervisc_grad.data, auxstate.data, grid.vgeo, t,
-                     grid.ω, grid.D, topology.realelems, increment))
+  volrhs! = volumerhs!(device, (Nq, Nq, Nqk), ntotal)
+  event = volrhs!(bl, Val(dim), Val(N), dg.diffusion_direction, dQdt.data,
+                  Q.data, Qvisc.data, Qhypervisc_grad.data, auxstate.data, grid.vgeo, t,
+                  grid.ω, grid.D, topology.realelems, increment)
+  wait(event)
 
   if communicate
     if nviscstate > 0 || nhyperviscstate > 0
@@ -177,13 +185,14 @@ function (dg::DGModel)(dQdt, Q, ::Nothing, t; increment=false)
     end
   end
 
-  @launch(device, threads=Nfp, blocks=nrealelem,
-          facerhs!(bl, Val(dim), Val(N), dg.direction,
-                   dg.numfluxnondiff,
-                   dg.numfluxdiff,
-                   dQdt.data, Q.data, Qvisc.data, Qhypervisc_grad.data,
-                   auxstate.data, grid.vgeo, grid.sgeo, t, grid.vmap⁻, grid.vmap⁺, grid.elemtobndy,
-                   topology.realelems))
+  frhs! = facerhs!(device, (Nfp,), (Nfp * nrealelem,))
+  event = frhs!(bl, Val(dim), Val(N), dg.direction,
+                dg.numfluxnondiff,
+                dg.numfluxdiff,
+                dQdt.data, Q.data, Qvisc.data, Qhypervisc_grad.data,
+                auxstate.data, grid.vgeo, grid.sgeo, t, grid.vmap⁻, grid.vmap⁺, grid.elemtobndy,
+                topology.realelems)
+  wait(event)
 
   # Just to be safe, we wait on the sends we started.
   if communicate
@@ -213,19 +222,21 @@ function init_ode_state(dg::DGModel, args...;
   nrealelem = length(topology.realelems)
 
   if !forcecpu
-    @launch(device, threads=(Np,), blocks=nrealelem,
-            initstate!(bl, Val(dim), Val(N), state.data, auxstate.data, grid.vgeo,
-                     topology.realelems, args...))
+    initst! = initstate!(device, (Np,), (Np * nrealelem,))
+    event = initst!(bl, Val(dim), Val(N), state.data, auxstate.data, grid.vgeo,
+                    topology.realelems, args...)
+    wait(event)
   else
     h_state = similar(state, Array)
     h_auxstate = similar(auxstate, Array)
     h_auxstate .= auxstate
-    @launch(CPU(), threads=(Np,), blocks=nrealelem,
-      initstate!(bl, Val(dim), Val(N), h_state.data, h_auxstate.data, Array(grid.vgeo),
-          topology.realelems, args...))
+    initst! = initstate!(CPU(), (Np,), (Np * nrealelem,))
+    event = initst!(bl, Val(dim), Val(N), h_state.data, h_auxstate.data, Array(grid.vgeo),
+                    topology.realelems, args...)
+    wait(event)
     state .= h_state
   end
-
+  
   MPIStateArrays.start_ghost_exchange!(state)
   MPIStateArrays.finish_ghost_exchange!(state)
 
@@ -263,11 +274,21 @@ function indefinite_stack_integral!(dg::DGModel, m::BalanceLaw,
   nvertelem = topology.stacksize
   nhorzelem = div(nelem, nvertelem)
 
-  @launch(device, threads=(Nq, Nqk, 1), blocks=nhorzelem,
-          knl_indefinite_stack_integral!(m, Val(dim), Val(N),
-                                         Val(nvertelem),
-                                         Q.data, auxstate.data,
-                                         grid.vgeo, grid.Imat, 1:nhorzelem))
+  indefinite_stack_integral! = knl_indefinite_stack_integral!(device, (Nq, Nqk), (Nq, Nqk, nhorzelem))
+  event = indefinite_stack_integral!(m, Val(dim), Val(N),
+                                     Val(nvertelem),
+                                     Q.data, auxstate.data,
+                                     grid.vgeo, grid.Imat, 1:nhorzelem)
+  wait(event)
+end
+
+# fallback
+function update_aux!(dg::DGModel, bl::BalanceLaw, Q::MPIStateArray, t::Real)
+  return false
+end
+
+function update_aux_diffusive!(dg::DGModel, bl::BalanceLaw, Q::MPIStateArray, t::Real)
+  return false
 end
 
 function reverse_indefinite_stack_integral!(dg::DGModel,
@@ -292,11 +313,14 @@ function reverse_indefinite_stack_integral!(dg::DGModel,
   nvertelem = topology.stacksize
   nhorzelem = div(nelem, nvertelem)
 
-  @launch(device, threads=(Nq, Nqk, 1), blocks=nhorzelem,
-          knl_reverse_indefinite_stack_integral!(m, Val(dim), Val(N),
-                                                 Val(nvertelem),
-                                                 Q.data, auxstate.data,
-                                                 1:nhorzelem))
+  reverse_indefinite_stack_integral! = knl_reverse_indefinite_stack_integral!(device,
+                                                                              (Nq, Nqk),
+                                                                              (Nq, Nqk, nhorzelem))
+  event = reverse_indefinite_stack_integral!(m, Val(dim), Val(N),
+                                             Val(nvertelem),
+                                             Q.data, auxstate.data,
+                                             1:nhorzelem)
+  wait(event)
 end
 
 function nodal_update_aux!(f!, dg::DGModel, m::BalanceLaw, Q::MPIStateArray,
@@ -313,17 +337,18 @@ function nodal_update_aux!(f!, dg::DGModel, m::BalanceLaw, Q::MPIStateArray,
 
   Np = dofs_per_element(grid)
 
+  nodal_update_aux! = knl_nodal_update_aux!(device, (Np,), (Np * nrealelem,))
   ### update aux variables
   if diffusive
-    @launch(device, threads=(Np,), blocks=nrealelem,
-            knl_nodal_update_aux!(m, Val(dim), Val(N), f!,
-                            Q.data, dg.auxstate.data, dg.diffstate.data, t,
-                            topology.realelems))
+    event = nodal_update_aux!(m, Val(dim), Val(N), f!,
+                              Q.data, dg.auxstate.data, dg.diffstate.data, t,
+                              topology.realelems)
+    wait(event)
   else
-    @launch(device, threads=(Np,), blocks=nrealelem,
-            knl_nodal_update_aux!(m, Val(dim), Val(N), f!,
-                            Q.data, dg.auxstate.data, t,
-                            topology.realelems))
+    event = nodal_update_aux!(m, Val(dim), Val(N), f!,
+                              Q.data, dg.auxstate.data, t,
+                              topology.realelems)
+    wait(event)
   end
 end
 
@@ -345,30 +370,30 @@ model.
 """
 function courant(local_courant::Function, dg::DGModel, m::BalanceLaw,
                  Q::MPIStateArray, Δt, direction=EveryDirection())
-    grid = dg.grid
-    topology = grid.topology
-    nrealelem = length(topology.realelems)
+    #grid = dg.grid
+    #topology = grid.topology
+    #nrealelem = length(topology.realelems)
 
-    if nrealelem > 0
-        N = polynomialorder(grid)
-        dim = dimensionality(grid)
-        Nq = N + 1
-        Nqk = dim == 2 ? 1 : Nq
-        device = grid.vgeo isa Array ? CPU() : CUDA()
-        pointwise_courant = similar(grid.vgeo, Nq^dim, nrealelem)
-        @launch(device, threads=(Nq, Nq, Nqk), blocks=nrealelem,
-        Grids.knl_min_neighbor_distance!(Val(N), Val(dim), direction,
-                                         pointwise_courant, grid.vgeo, topology.realelems))
-        @launch(device, threads=(Nq*Nq*Nqk,), blocks=nrealelem,
-                knl_local_courant!(m, Val(dim), Val(N), pointwise_courant,
-                local_courant, Q.data, dg.auxstate.data,
-                dg.diffstate.data, topology.realelems, direction, Δt))
-        rank_courant_max = maximum(pointwise_courant)
-    else
-        rank_courant_max = typemin(eltype(Q))
-    end
+    #if nrealelem > 0
+    #    N = polynomialorder(grid)
+    #    dim = dimensionality(grid)
+    #    Nq = N + 1
+    #    Nqk = dim == 2 ? 1 : Nq
+    #    device = grid.vgeo isa Array ? CPU() : CUDA()
+    #    pointwise_courant = similar(grid.vgeo, Nq^dim, nrealelem)
+    #    @launch(device, threads=(Nq, Nq, Nqk), blocks=nrealelem,
+    #    Grids.knl_min_neighbor_distance!(Val(N), Val(dim), direction,
+    #                                     pointwise_courant, grid.vgeo, topology.realelems))
+    #    @launch(device, threads=(Nq*Nq*Nqk,), blocks=nrealelem,
+    #            knl_local_courant!(m, Val(dim), Val(N), pointwise_courant,
+    #            local_courant, Q.data, dg.auxstate.data,
+    #            dg.diffstate.data, topology.realelems, direction, Δt))
+    #    rank_courant_max = maximum(pointwise_courant)
+    #else
+    #    rank_courant_max = typemin(eltype(Q))
+    #end
 
-    MPI.Allreduce(rank_courant_max, max, topology.mpicomm)
+    #MPI.Allreduce(rank_courant_max, max, topology.mpicomm)
 end
 
 function copy_stack_field_down!(dg::DGModel, m::BalanceLaw,
@@ -389,10 +414,11 @@ function copy_stack_field_down!(dg::DGModel, m::BalanceLaw,
   nvertelem = topology.stacksize
   nhorzelem = div(nelem, nvertelem)
 
-  @launch(device, threads=(Nq, Nqk, 1), blocks=nhorzelem,
-          knl_copy_stack_field_down!(Val(dim), Val(N), Val(nvertelem),
-                                     auxstate.data, 1:nhorzelem, Val(fldin),
-                                     Val(fldout)))
+  copy_stack_field_down! = knl_copy_stack_field_down!(device, (Nq, Nqk), (Nq, Nqk, nhorzelem))
+  event = copy_stack_field_down!(Val(dim), Val(N), Val(nvertelem),
+                                 auxstate.data, 1:nhorzelem, Val(fldin),
+                                 Val(fldout))
+  wait(event)
 end
 
 function MPIStateArrays.MPIStateArray(dg::DGModel, commtag=888)
