@@ -115,7 +115,7 @@ function AtmosModel{FT}(::Type{AtmosGCMConfiguration};
                          radiation::R          = NoRadiation(),
                          source::S             = (Gravity(), Coriolis()),
                          boundarycondition::BC = NoFluxBC(),
-                         init_state::IS=nothing) where {FT<:AbstractFloat,O,RS,T,M,P,R,SU,S,BC,IS}
+                         init_state::IS=nothing) where {FT<:AbstractFloat,O,RS,T,M,P,R,S,BC,IS}
   @assert init_state ≠ nothing
   atmos = (
         orientation,
